@@ -4,73 +4,140 @@ import { useEffect, useState } from 'react'
 import { getSupabase } from '@/lib/supabase'
 import type { Prop, LineHistory } from '@/lib/types'
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend
 } from 'recharts'
 
-interface Props {
+const SOURCE_COLORS: Record<string, string> = {
+  underdog: '#facc15',
+  kalshi: '#4ade80',
+  prizepicks: '#c084fc',
+  draftkings: '#60a5fa',
+  fanduel: '#fb923c',
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  underdog: 'Underdog',
+  kalshi: 'Kalshi',
+  prizepicks: 'PrizePicks',
+  draftkings: 'DraftKings',
+  fanduel: 'FanDuel',
+}
+
+interface SourceData {
+  line: number | null
+  over: string | null
+  under: string | null
+  updated_at: string
   prop: Prop
+}
+
+interface Props {
+  playerName: string
+  statType: string
+  sportId: string
+  gameDisplay: string
+  sources: Record<string, SourceData>
   onClose: () => void
 }
 
-export default function LineHistoryModal({ prop, onClose }: Props) {
-  const [history, setHistory] = useState<LineHistory[]>([])
+export default function LineHistoryModal({ playerName, statType, sportId, gameDisplay, sources, onClose }: Props) {
+  const [historyBySource, setHistoryBySource] = useState<Record<string, LineHistory[]>>({})
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<'line' | 'price'>('line')
+
+  const activeSources = Object.keys(sources)
 
   useEffect(() => {
     async function fetchHistory() {
       setLoading(true)
-      const { data, error } = await getSupabase()
-        .from('ud_line_history')
-        .select('*')
-        .eq('prop_id', prop.id)
-        .order('recorded_at', { ascending: true })
-        .limit(500)
+      const supabase = getSupabase()
 
-      if (!error && data) {
-        setHistory(data as LineHistory[])
-      }
+      // Fetch history for all source prop IDs
+      const results: Record<string, LineHistory[]> = {}
+      await Promise.all(
+        activeSources.map(async (src) => {
+          const propId = sources[src].prop.id
+          const { data } = await supabase
+            .from('ud_line_history')
+            .select('*')
+            .eq('prop_id', propId)
+            .order('recorded_at', { ascending: true })
+            .limit(500)
+          results[src] = (data || []) as LineHistory[]
+        })
+      )
+      setHistoryBySource(results)
       setLoading(false)
     }
     fetchHistory()
 
-    // Close on escape
     const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [prop.id, onClose])
+  }, [onClose])
 
-  const chartData = history
-    .filter(h => h.event_type !== 'remove')
-    .map(h => ({
-      time: new Date(h.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      timestamp: new Date(h.recorded_at).getTime(),
-      line: h.stat_value,
-      overPrice: h.over_price ? parseInt(h.over_price) : null,
-      underPrice: h.under_price ? parseInt(h.under_price) : null,
-      overDecimal: h.over_decimal,
-      underDecimal: h.under_decimal,
-      event: h.event_type
-    }))
+  // Build unified chart data: timestamp → { time, source1_line, source2_line, ... }
+  const chartData = (() => {
+    // Collect all events across sources
+    const events: { ts: number; source: string; line: number | null; over: number | null; under: number | null }[] = []
 
-  const lineValues = chartData.map(d => d.line).filter(v => v != null) as number[]
-  const lineMin = lineValues.length ? Math.min(...lineValues) : 0
-  const lineMax = lineValues.length ? Math.max(...lineValues) : 0
+    for (const src of activeSources) {
+      const hist = historyBySource[src] || []
+      for (const h of hist) {
+        if (h.event_type === 'remove') continue
+        events.push({
+          ts: new Date(h.recorded_at).getTime(),
+          source: src,
+          line: h.stat_value,
+          over: h.over_price ? parseInt(h.over_price) : null,
+          under: h.under_price ? parseInt(h.under_price) : null,
+        })
+      }
+    }
+
+    if (events.length === 0) return []
+
+    // Sort by time
+    events.sort((a, b) => a.ts - b.ts)
+
+    // Build chart points: at each event, carry forward latest values for all sources
+    const latest: Record<string, { line: number | null; over: number | null; under: number | null }> = {}
+    const points: Record<string, any>[] = []
+
+    for (const ev of events) {
+      latest[ev.source] = { line: ev.line, over: ev.over, under: ev.under }
+      const point: Record<string, any> = {
+        time: new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        timestamp: ev.ts,
+      }
+      for (const src of activeSources) {
+        const val = latest[src]
+        if (val) {
+          point[`${src}_line`] = val.line
+          point[`${src}_over`] = val.over
+          point[`${src}_under`] = val.under
+        }
+      }
+      points.push(point)
+    }
+
+    return points
+  })()
+
+  const allLineValues = chartData.flatMap(d =>
+    activeSources.map(s => d[`${s}_line`]).filter((v): v is number => v != null)
+  )
+  const lineMin = allLineValues.length ? Math.min(...allLineValues) : 0
+  const lineMax = allLineValues.length ? Math.max(...allLineValues) : 0
   const linePad = Math.max((lineMax - lineMin) * 0.2, 0.5)
 
-  const priceValues = chartData.flatMap(d => [d.overPrice, d.underPrice]).filter(v => v != null) as number[]
-  const priceMin = priceValues.length ? Math.min(...priceValues) : -200
-  const priceMax = priceValues.length ? Math.max(...priceValues) : 200
+  const allPriceValues = chartData.flatMap(d =>
+    activeSources.flatMap(s => [d[`${s}_over`], d[`${s}_under`]]).filter((v): v is number => v != null)
+  )
+  const priceMin = allPriceValues.length ? Math.min(...allPriceValues) : -200
+  const priceMax = allPriceValues.length ? Math.max(...allPriceValues) : 200
 
-  const totalChanges = history.filter(h => h.event_type === 'swap').length
-  const firstSeen = history.length ? new Date(history[0].recorded_at) : null
-  const lastSeen = history.length ? new Date(history[history.length - 1].recorded_at) : null
-
-  // Calculate line movement
-  const lineChanges = chartData.filter(d => d.line != null)
-  const openingLine = lineChanges.length > 0 ? lineChanges[0].line : null
-  const currentLine = lineChanges.length > 0 ? lineChanges[lineChanges.length - 1].line : null
-  const lineDelta = openingLine != null && currentLine != null ? currentLine - openingLine : null
+  const totalHistory = Object.values(historyBySource).reduce((sum, h) => sum + h.length, 0)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -81,26 +148,35 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
         {/* Header */}
         <div className="flex items-start justify-between p-5 border-b border-gray-800">
           <div>
-            <h2 className="text-lg font-bold">{prop.player_name || 'Unknown'}</h2>
+            <h2 className="text-lg font-bold">{playerName}</h2>
             <div className="flex items-center gap-2 mt-1 text-sm text-gray-400">
-              <span className="px-2 py-0.5 rounded bg-gray-800 text-xs">{prop.sport_id}</span>
-              <span>{prop.stat_type}</span>
-              {prop.game_display && <span>· {prop.game_display}</span>}
+              <span className="px-2 py-0.5 rounded bg-gray-800 text-xs">{sportId}</span>
+              <span>{statType}</span>
+              {gameDisplay && <span>· {gameDisplay}</span>}
             </div>
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>
         </div>
 
-        {/* Stats row */}
-        <div className="grid grid-cols-4 gap-4 p-5 border-b border-gray-800">
-          <StatBox label="Current Line" value={prop.stat_value?.toString() || '—'} accent />
-          <StatBox label="Over" value={formatPrice(prop.over_price)} color={priceColor(prop.over_price)} />
-          <StatBox label="Under" value={formatPrice(prop.under_price)} color={priceColor(prop.under_price)} />
-          <StatBox
-            label="Movement"
-            value={lineDelta != null ? `${lineDelta > 0 ? '+' : ''}${lineDelta.toFixed(1)}` : '—'}
-            color={lineDelta != null ? (lineDelta > 0 ? '#22c55e' : lineDelta < 0 ? '#ef4444' : '#9ca3af') : undefined}
-          />
+        {/* Current lines from all sources */}
+        <div className="flex items-center gap-4 p-5 border-b border-gray-800 flex-wrap">
+          {activeSources.map(src => {
+            const d = sources[src]
+            const color = SOURCE_COLORS[src]
+            return (
+              <div key={src} className="text-center min-w-[100px]">
+                <div className="text-xs text-gray-500 mb-1" style={{ color }}>{SOURCE_LABELS[src] || src}</div>
+                <div className="text-lg font-bold font-mono" style={{ color }}>
+                  {d.line ?? '—'}
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {d.over && <span className="text-green-400">O {formatPrice(d.over)}</span>}
+                  {d.over && d.under && <span className="mx-1">/</span>}
+                  {d.under && <span className="text-red-400">U {formatPrice(d.under)}</span>}
+                </div>
+              </div>
+            )
+          })}
         </div>
 
         {/* Chart */}
@@ -121,7 +197,7 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
               </button>
             </div>
             <div className="text-xs text-gray-500">
-              {totalChanges} change{totalChanges !== 1 ? 's' : ''} · {firstSeen ? `Since ${firstSeen.toLocaleTimeString()}` : ''}
+              {totalHistory} data points · {activeSources.length} source{activeSources.length !== 1 ? 's' : ''}
             </div>
           </div>
 
@@ -131,11 +207,11 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
             <div className="h-64 flex items-center justify-center text-gray-500">
               <div className="text-center">
                 <div className="text-2xl mb-2">📊</div>
-                <div>No movement yet — check back as the line moves</div>
+                <div>No movement yet — check back as lines move</div>
               </div>
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height={280}>
+            <ResponsiveContainer width="100%" height={300}>
               {view === 'line' ? (
                 <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
@@ -150,18 +226,20 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
                     contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: 8 }}
                     labelStyle={{ color: '#9ca3af' }}
                   />
-                  {openingLine != null && (
-                    <ReferenceLine y={openingLine} stroke="#6366f1" strokeDasharray="5 5" label={{ value: `Open: ${openingLine}`, fill: '#6366f1', fontSize: 11 }} />
-                  )}
-                  <Line
-                    type="stepAfter"
-                    dataKey="line"
-                    stroke="#818cf8"
-                    strokeWidth={2}
-                    dot={{ r: 3, fill: '#818cf8' }}
-                    activeDot={{ r: 5, fill: '#a78bfa' }}
-                    name="Line"
-                  />
+                  <Legend />
+                  {activeSources.map(src => (
+                    <Line
+                      key={src}
+                      type="stepAfter"
+                      dataKey={`${src}_line`}
+                      stroke={SOURCE_COLORS[src]}
+                      strokeWidth={2}
+                      dot={{ r: 2, fill: SOURCE_COLORS[src] }}
+                      activeDot={{ r: 4 }}
+                      name={SOURCE_LABELS[src] || src}
+                      connectNulls
+                    />
+                  ))}
                 </LineChart>
               ) : (
                 <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
@@ -173,17 +251,40 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
                     labelStyle={{ color: '#9ca3af' }}
                     formatter={(value: any, name: any) => [`${value > 0 ? '+' : ''}${value}`, name]}
                   />
-                  <ReferenceLine y={-110} stroke="#374151" strokeDasharray="3 3" />
-                  <Line type="stepAfter" dataKey="overPrice" stroke="#22c55e" strokeWidth={2} dot={{ r: 2 }} name="Over" />
-                  <Line type="stepAfter" dataKey="underPrice" stroke="#ef4444" strokeWidth={2} dot={{ r: 2 }} name="Under" />
+                  <Legend />
+                  {activeSources.map(src => (
+                    <Line
+                      key={`${src}-over`}
+                      type="stepAfter"
+                      dataKey={`${src}_over`}
+                      stroke={SOURCE_COLORS[src]}
+                      strokeWidth={2}
+                      dot={{ r: 2 }}
+                      name={`${SOURCE_LABELS[src]} Over`}
+                      connectNulls
+                    />
+                  ))}
+                  {activeSources.map(src => (
+                    <Line
+                      key={`${src}-under`}
+                      type="stepAfter"
+                      dataKey={`${src}_under`}
+                      stroke={SOURCE_COLORS[src]}
+                      strokeWidth={1}
+                      strokeDasharray="4 2"
+                      dot={{ r: 1 }}
+                      name={`${SOURCE_LABELS[src]} Under`}
+                      connectNulls
+                    />
+                  ))}
                 </LineChart>
               )}
             </ResponsiveContainer>
           )}
         </div>
 
-        {/* History table */}
-        {history.length > 1 && (
+        {/* History table — combined */}
+        {totalHistory > 1 && (
           <div className="px-5 pb-5">
             <h3 className="text-sm font-medium text-gray-400 mb-2">Change Log</h3>
             <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-800">
@@ -191,6 +292,7 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
                 <thead className="bg-gray-800 sticky top-0">
                   <tr>
                     <th className="text-left px-3 py-1.5 text-gray-400">Time</th>
+                    <th className="text-left px-3 py-1.5 text-gray-400">Source</th>
                     <th className="text-left px-3 py-1.5 text-gray-400">Event</th>
                     <th className="text-right px-3 py-1.5 text-gray-400">Line</th>
                     <th className="text-right px-3 py-1.5 text-gray-400">Over</th>
@@ -198,25 +300,31 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...history].reverse().map((h, i) => (
-                    <tr key={h.id} className="border-t border-gray-800/50">
-                      <td className="px-3 py-1.5 text-gray-500">
-                        {new Date(h.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </td>
-                      <td className="px-3 py-1.5">
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                          h.event_type === 'swap' ? 'bg-yellow-900/50 text-yellow-400' :
-                          h.event_type === 'remove' ? 'bg-red-900/50 text-red-400' :
-                          'bg-gray-800 text-gray-400'
-                        }`}>
-                          {h.event_type}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 text-right font-mono text-indigo-400">{h.stat_value ?? '—'}</td>
-                      <td className="px-3 py-1.5 text-right font-mono">{formatPrice(h.over_price)}</td>
-                      <td className="px-3 py-1.5 text-right font-mono">{formatPrice(h.under_price)}</td>
-                    </tr>
-                  ))}
+                  {Object.entries(historyBySource)
+                    .flatMap(([src, hist]) => hist.map(h => ({ ...h, _src: src })))
+                    .sort((a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime())
+                    .map((h, i) => (
+                      <tr key={`${h._src}-${h.id}`} className="border-t border-gray-800/50">
+                        <td className="px-3 py-1.5 text-gray-500">
+                          {new Date(h.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <span style={{ color: SOURCE_COLORS[h._src] }}>{SOURCE_LABELS[h._src] || h._src}</span>
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                            h.event_type === 'swap' ? 'bg-yellow-900/50 text-yellow-400' :
+                            h.event_type === 'remove' ? 'bg-red-900/50 text-red-400' :
+                            'bg-gray-800 text-gray-400'
+                          }`}>
+                            {h.event_type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-right font-mono text-indigo-400">{h.stat_value ?? '—'}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">{formatPrice(h.over_price)}</td>
+                        <td className="px-3 py-1.5 text-right font-mono">{formatPrice(h.under_price)}</td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             </div>
@@ -227,25 +335,8 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
   )
 }
 
-function StatBox({ label, value, accent, color }: { label: string; value: string; accent?: boolean; color?: string }) {
-  return (
-    <div className="text-center">
-      <div className="text-xs text-gray-500 mb-1">{label}</div>
-      <div className={`text-lg font-bold font-mono ${accent ? 'text-indigo-400' : ''}`} style={color ? { color } : undefined}>
-        {value}
-      </div>
-    </div>
-  )
-}
-
 function formatPrice(price: string | null): string {
   if (!price) return '—'
   const num = parseInt(price)
   return num > 0 ? `+${price}` : price
-}
-
-function priceColor(price: string | null): string | undefined {
-  if (!price) return undefined
-  const num = parseInt(price)
-  return num > 0 ? '#22c55e' : num < -150 ? '#ef4444' : '#9ca3af'
 }

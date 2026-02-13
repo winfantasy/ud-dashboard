@@ -20,6 +20,7 @@ export interface Prop {
   first_seen_at: string
   updated_at: string
   source: string // 'underdog' | 'kalshi' | 'draftkings' | 'fanduel'
+  odds_type?: string // 'standard' | 'goblin' | 'demon'
 }
 
 export interface LineHistory {
@@ -34,6 +35,7 @@ export interface LineHistory {
   event_type: string
   recorded_at: string
   source: string
+  odds_type?: string
 }
 
 export interface Player {

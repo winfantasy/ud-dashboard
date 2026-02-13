@@ -40,7 +40,7 @@ export default function Dashboard() {
   const [sortAsc, setSortAsc] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
-  const [selectedProp, setSelectedProp] = useState<Prop | null>(null)
+  const [selectedRow, setSelectedRow] = useState<MergedRow | null>(null)
   const [flashKeys, setFlashKeys] = useState<Set<string>>(new Set())
   const [sourcesEnabled, setSourcesEnabled] = useState<Record<string, boolean>>({})
   const [realtimeStatus, setRealtimeStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
@@ -203,6 +203,8 @@ export default function Dashboard() {
       const src = p.source || 'underdog'
       // Filter by enabled sources
       if (!sourcesEnabled[src]) continue
+      // PrizePicks: only show standard (base) lines in screener, skip goblin/demon
+      if (src === 'prizepicks' && p.odds_type && p.odds_type !== 'standard') continue
 
       const key = makeMergeKey(p)
       let row = map.get(key)
@@ -489,19 +491,19 @@ export default function Dashboard() {
                         }
                         return [
                           <td key={`${src}-line`} className={`px-2 py-2.5 text-right font-mono font-medium border-l border-gray-800 ${meta.text}`}
-                              onClick={() => setSelectedProp(d.prop)}
+                              onClick={() => setSelectedRow(row)}
                               style={{ cursor: 'pointer' }}
                           >
                             {d.line ?? '—'}
                           </td>,
                           <td key={`${src}-over`} className="px-1 py-2.5 text-right font-mono text-xs"
-                              onClick={() => setSelectedProp(d.prop)}
+                              onClick={() => setSelectedRow(row)}
                               style={{ cursor: 'pointer' }}
                           >
                             <PriceCell price={d.over} />
                           </td>,
                           <td key={`${src}-under`} className="px-1 py-2.5 text-right font-mono text-xs"
-                              onClick={() => setSelectedProp(d.prop)}
+                              onClick={() => setSelectedRow(row)}
                               style={{ cursor: 'pointer' }}
                           >
                             <PriceCell price={d.under} />
@@ -523,10 +525,14 @@ export default function Dashboard() {
         )}
       </main>
 
-      {selectedProp && (
+      {selectedRow && (
         <LineHistoryModal
-          prop={selectedProp}
-          onClose={() => setSelectedProp(null)}
+          playerName={selectedRow.player_name}
+          statType={selectedRow.stat_type}
+          sportId={selectedRow.sport_id}
+          gameDisplay={selectedRow.game_display}
+          sources={selectedRow.sources}
+          onClose={() => setSelectedRow(null)}
         />
       )}
     </div>
