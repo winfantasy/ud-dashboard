@@ -5,26 +5,31 @@ import { getSupabase } from '@/lib/supabase'
 import type { Prop } from '@/lib/types'
 import LineHistoryModal from '@/components/LineHistoryModal'
 
-const SPORTS = ['ALL', 'NBA', 'CBB', 'NHL', 'PGA', 'MMA', 'UNRIVALED'] as const
-const STAT_FILTERS: Record<string, string[]> = {
-  ALL: [],
-  NBA: ['Points', 'Rebounds', 'Assists', '3-Pointers Made', 'Pts + Rebs + Asts', 'Points + Rebounds', 'Points + Assists', 'Rebounds + Assists', 'Steals', 'Blocks', 'Turnovers', 'Double-Doubles', 'Blks + Stls'],
-  CBB: ['Points', 'Rebounds', 'Assists', '3-Pointers Made', 'Pts + Rebs + Asts'],
-  NHL: ['Goals + Assists', 'Shots on Goal', 'Saves', 'Goals Against'],
-  PGA: ['Round Strokes', 'Birdies or Better', 'Bogeys or Worse', 'Pars or Better'],
-  MMA: [],
-  UNRIVALED: ['Points', 'Rebounds', 'Assists', '3-Pointers Made'],
+const SPORTS = ['ALL', 'NBA', 'CBB', 'NHL', 'MLB', 'PGA', 'MMA', 'SOCCER', 'TENNIS', 'UNRIVALED'] as const
+
+const SOURCE_META: Record<string, { bg: string; text: string; dot: string; label: string; color: string }> = {
+  underdog: { bg: 'bg-yellow-900/30', text: 'text-yellow-400', dot: 'bg-yellow-400', label: 'UD', color: '#facc15' },
+  kalshi: { bg: 'bg-green-900/30', text: 'text-green-400', dot: 'bg-green-400', label: 'KAL', color: '#4ade80' },
+  draftkings: { bg: 'bg-blue-900/30', text: 'text-blue-400', dot: 'bg-blue-400', label: 'DK', color: '#60a5fa' },
+  prizepicks: { bg: 'bg-purple-900/30', text: 'text-purple-400', dot: 'bg-purple-400', label: 'PP', color: '#c084fc' },
+  fanduel: { bg: 'bg-orange-900/30', text: 'text-orange-400', dot: 'bg-orange-400', label: 'FD', color: '#fb923c' },
 }
 
-const SOURCE_COLORS: Record<string, { bg: string; text: string; dot: string; label: string }> = {
-  underdog: { bg: 'bg-yellow-900/30', text: 'text-yellow-400', dot: 'bg-yellow-400', label: 'UD' },
-  kalshi: { bg: 'bg-green-900/30', text: 'text-green-400', dot: 'bg-green-400', label: 'KAL' },
-  draftkings: { bg: 'bg-blue-900/30', text: 'text-blue-400', dot: 'bg-blue-400', label: 'DK' },
-  prizepicks: { bg: 'bg-purple-900/30', text: 'text-purple-400', dot: 'bg-purple-400', label: 'PP' },
-  fanduel: { bg: 'bg-orange-900/30', text: 'text-orange-400', dot: 'bg-orange-400', label: 'FD' },
+const SOURCES_ORDER = ['underdog', 'kalshi', 'prizepicks', 'draftkings', 'fanduel']
+
+// Merged row: one per player+stat, with per-source data
+interface MergedRow {
+  key: string
+  player_name: string
+  sport_id: string
+  stat_type: string
+  game_display: string
+  team_abbr: string
+  sources: Record<string, { line: number | null; over: string | null; under: string | null; updated_at: string; prop: Prop }>
+  latestUpdate: string
 }
 
-type SortField = 'player_name' | 'stat_type' | 'stat_value' | 'over_price' | 'under_price' | 'updated_at'
+type SortField = 'player_name' | 'stat_type' | 'line' | 'updated_at'
 
 export default function Dashboard() {
   const [props, setProps] = useState<Prop[]>([])
@@ -36,8 +41,8 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [selectedProp, setSelectedProp] = useState<Prop | null>(null)
-  const [flashIds, setFlashIds] = useState<Set<string>>(new Set())
-  const [sourceFilter, setSourceFilter] = useState<string>('ALL')
+  const [flashKeys, setFlashKeys] = useState<Set<string>>(new Set())
+  const [sourcesEnabled, setSourcesEnabled] = useState<Record<string, boolean>>({})
   const [realtimeStatus, setRealtimeStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const propsRef = useRef<Map<string, Prop>>(new Map())
 
@@ -50,7 +55,7 @@ export default function Dashboard() {
         .select('*')
         .eq('status', 'active')
         .order('updated_at', { ascending: false })
-        .limit(10000)
+        .limit(20000)
 
       if (error) {
         console.error('Fetch error:', error)
@@ -61,13 +66,19 @@ export default function Dashboard() {
       const propsList = (data || []) as Prop[]
       setProps(propsList)
       propsRef.current = new Map(propsList.map(p => [p.id, p]))
+
+      // Init all found sources as enabled
+      const srcs: Record<string, boolean> = {}
+      propsList.forEach(p => { srcs[p.source || 'underdog'] = true })
+      setSourcesEnabled(srcs)
+
       setLastUpdate(new Date())
       setLoading(false)
     }
     fetchProps()
   }, [])
 
-  // Subscribe to realtime changes - using singleton client
+  // Subscribe to realtime
   useEffect(() => {
     const supabase = getSupabase()
     const channel = supabase
@@ -84,14 +95,15 @@ export default function Dashboard() {
           propsRef.current.delete(oldProp?.id || newProp?.id || '')
         } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
           propsRef.current.set(newProp.id, newProp)
-          setFlashIds(prev => new Set(prev).add(newProp.id))
+          const mergeKey = makeMergeKey(newProp)
+          setFlashKeys(prev => new Set(prev).add(mergeKey))
           setTimeout(() => {
-            setFlashIds(prev => {
-              const next = new Set(prev)
-              next.delete(newProp.id)
-              return next
-            })
+            setFlashKeys(prev => { const next = new Set(prev); next.delete(mergeKey); return next })
           }, 2000)
+
+          // Enable new source if first time
+          const src = newProp.source || 'underdog'
+          setSourcesEnabled(prev => prev[src] ? prev : { ...prev, [src]: true })
         }
 
         setProps(Array.from(propsRef.current.values()))
@@ -105,38 +117,110 @@ export default function Dashboard() {
     return () => { supabase.removeChannel(channel) }
   }, [])
 
-  // Filter and sort
+  // Active sources (ordered)
+  const activeSources = useMemo(() => {
+    return SOURCES_ORDER.filter(s => sourcesEnabled[s])
+  }, [sourcesEnabled])
+
+  // Normalize player name for matching
+  const normName = (name: string | null) => {
+    if (!name) return ''
+    return name.toLowerCase().trim()
+      .replace(/[.\-']/g, '')
+      .replace(/\s+/g, ' ')
+  }
+
+  // Normalize stat type for matching
+  const normStat = (stat: string) => {
+    return stat.toLowerCase().trim()
+      .replace(/three pointers made/i, '3-pointers made')
+      .replace(/3-pointers/i, '3-pointers')
+      .replace(/pts \+ reb \+ ast/i, 'pts + rebs + asts')
+      .replace(/pts \+ rebs \+ asts/i, 'pts + rebs + asts')
+  }
+
+  // Merge key for grouping
+  function makeMergeKey(p: Prop): string {
+    return `${normName(p.player_name)}||${normStat(p.stat_type)}||${p.sport_id}`
+  }
+
+  // Merge props into rows
+  const merged = useMemo(() => {
+    const map = new Map<string, MergedRow>()
+
+    for (const p of props) {
+      const src = p.source || 'underdog'
+      // Filter by enabled sources
+      if (!sourcesEnabled[src]) continue
+
+      const key = makeMergeKey(p)
+      let row = map.get(key)
+      if (!row) {
+        row = {
+          key,
+          player_name: p.player_name || '—',
+          sport_id: p.sport_id,
+          stat_type: p.stat_type,
+          game_display: p.game_display || '—',
+          team_abbr: p.team_abbr || '',
+          sources: {},
+          latestUpdate: p.updated_at,
+        }
+        map.set(key, row)
+      }
+
+      // Keep best data per source (latest update wins)
+      if (!row.sources[src] || p.updated_at > row.sources[src].updated_at) {
+        row.sources[src] = {
+          line: p.stat_value,
+          over: p.over_price,
+          under: p.under_price,
+          updated_at: p.updated_at,
+          prop: p,
+        }
+      }
+
+      if (p.updated_at > row.latestUpdate) {
+        row.latestUpdate = p.updated_at
+        row.game_display = p.game_display || row.game_display
+      }
+    }
+
+    return Array.from(map.values())
+  }, [props, sourcesEnabled])
+
+  // Filter and sort merged rows
   const filtered = useMemo(() => {
-    let result = props
+    let result = merged
 
     if (sport !== 'ALL') {
-      result = result.filter(p => p.sport_id === sport)
+      result = result.filter(r => r.sport_id === sport)
     }
     if (statFilter !== 'ALL') {
-      result = result.filter(p => p.stat_type === statFilter)
-    }
-    if (sourceFilter !== 'ALL') {
-      result = result.filter(p => p.source === sourceFilter)
+      result = result.filter(r => r.stat_type === statFilter)
     }
     if (search) {
       const q = search.toLowerCase()
-      result = result.filter(p =>
-        (p.player_name?.toLowerCase().includes(q)) ||
-        (p.game_display?.toLowerCase().includes(q)) ||
-        (p.team_abbr?.toLowerCase().includes(q))
+      result = result.filter(r =>
+        r.player_name.toLowerCase().includes(q) ||
+        r.game_display.toLowerCase().includes(q) ||
+        r.team_abbr.toLowerCase().includes(q)
       )
     }
 
     result.sort((a, b) => {
       let aVal: string | number, bVal: string | number
       switch (sortField) {
-        case 'player_name': aVal = a.player_name || ''; bVal = b.player_name || ''; break
-        case 'stat_type': aVal = a.stat_type || ''; bVal = b.stat_type || ''; break
-        case 'stat_value': aVal = a.stat_value ?? 0; bVal = b.stat_value ?? 0; break
-        case 'over_price': aVal = parsePrice(a.over_price); bVal = parsePrice(b.over_price); break
-        case 'under_price': aVal = parsePrice(a.under_price); bVal = parsePrice(b.under_price); break
-        case 'updated_at': aVal = a.updated_at; bVal = b.updated_at; break
-        default: aVal = a.updated_at; bVal = b.updated_at;
+        case 'player_name': aVal = a.player_name; bVal = b.player_name; break
+        case 'stat_type': aVal = a.stat_type; bVal = b.stat_type; break
+        case 'line': {
+          // Sort by first available line
+          const aLine = Object.values(a.sources)[0]?.line ?? 0
+          const bLine = Object.values(b.sources)[0]?.line ?? 0
+          aVal = aLine; bVal = bLine; break
+        }
+        case 'updated_at': aVal = a.latestUpdate; bVal = b.latestUpdate; break
+        default: aVal = a.latestUpdate; bVal = b.latestUpdate;
       }
       if (aVal < bVal) return sortAsc ? -1 : 1
       if (aVal > bVal) return sortAsc ? 1 : -1
@@ -144,7 +228,7 @@ export default function Dashboard() {
     })
 
     return result
-  }, [props, sport, statFilter, sourceFilter, search, sortField, sortAsc])
+  }, [merged, sport, statFilter, search, sortField, sortAsc])
 
   const handleSort = useCallback((field: SortField) => {
     if (sortField === field) setSortAsc(!sortAsc)
@@ -152,15 +236,13 @@ export default function Dashboard() {
   }, [sortField, sortAsc])
 
   const sportCounts = useMemo(() => {
-    const counts: Record<string, number> = { ALL: props.length }
-    props.forEach(p => {
-      counts[p.sport_id] = (counts[p.sport_id] || 0) + 1
-    })
+    const counts: Record<string, number> = { ALL: merged.length }
+    merged.forEach(r => { counts[r.sport_id] = (counts[r.sport_id] || 0) + 1 })
     return counts
-  }, [props])
+  }, [merged])
 
   const sourceCounts = useMemo(() => {
-    const counts: Record<string, number> = { ALL: props.length }
+    const counts: Record<string, number> = {}
     props.forEach(p => {
       const src = p.source || 'underdog'
       counts[src] = (counts[src] || 0) + 1
@@ -168,21 +250,28 @@ export default function Dashboard() {
     return counts
   }, [props])
 
+  // Stat types for current sport
   const statTypes = useMemo(() => {
     if (sport === 'ALL') return []
-    return STAT_FILTERS[sport] || []
-  }, [sport])
+    const stats = new Set<string>()
+    merged.filter(r => r.sport_id === sport).forEach(r => stats.add(r.stat_type))
+    return Array.from(stats).sort()
+  }, [sport, merged])
 
-  const activeSources = useMemo(() => {
-    const sources = new Set(props.map(p => p.source || 'underdog'))
-    return Array.from(sources).sort()
-  }, [props])
+  // How many sources does each row have?
+  const multiSourceCount = useMemo(() => {
+    return filtered.filter(r => Object.keys(r.sources).length > 1).length
+  }, [filtered])
+
+  const toggleSource = (src: string) => {
+    setSourcesEnabled(prev => ({ ...prev, [src]: !prev[src] }))
+  }
 
   return (
     <div className="min-h-screen">
       {/* Header */}
       <header className="sticky top-0 z-30 bg-gray-950/95 backdrop-blur border-b border-gray-800 px-4 py-3">
-        <div className="max-w-[1600px] mx-auto">
+        <div className="max-w-[1800px] mx-auto">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-bold">📊 Props Dashboard</h1>
@@ -195,42 +284,38 @@ export default function Dashboard() {
               </span>
             </div>
             <div className="flex items-center gap-4 text-xs text-gray-400">
-              <span>{filtered.length.toLocaleString()} lines</span>
+              <span>{filtered.length.toLocaleString()} rows</span>
+              {multiSourceCount > 0 && (
+                <span className="text-indigo-400">{multiSourceCount} cross-source</span>
+              )}
               {lastUpdate && (
                 <span>Updated {lastUpdate.toLocaleTimeString()}</span>
               )}
             </div>
           </div>
 
-          {/* Source legend */}
-          {activeSources.length > 1 && (
-            <div className="flex items-center gap-3 mb-3">
-              <span className="text-xs text-gray-500">Sources:</span>
-              <button
-                onClick={() => setSourceFilter('ALL')}
-                className={`px-2 py-0.5 text-xs rounded ${
-                  sourceFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'
-                }`}
-              >
-                All ({sourceCounts.ALL || 0})
-              </button>
-              {activeSources.map(src => {
-                const colors = SOURCE_COLORS[src] || SOURCE_COLORS.underdog
-                return (
-                  <button
-                    key={src}
-                    onClick={() => setSourceFilter(src)}
-                    className={`flex items-center gap-1.5 px-2 py-0.5 text-xs rounded ${
-                      sourceFilter === src ? `${colors.bg} ${colors.text}` : 'text-gray-400 hover:text-gray-200'
-                    }`}
-                  >
-                    <span className={`w-2 h-2 rounded-full ${colors.dot}`} />
-                    {colors.label} ({sourceCounts[src] || 0})
-                  </button>
-                )
-              })}
-            </div>
-          )}
+          {/* Source toggles */}
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <span className="text-xs text-gray-500">Sources:</span>
+            {SOURCES_ORDER.filter(s => sourceCounts[s]).map(src => {
+              const meta = SOURCE_META[src]
+              const enabled = sourcesEnabled[src]
+              return (
+                <button
+                  key={src}
+                  onClick={() => toggleSource(src)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border transition-all ${
+                    enabled
+                      ? `${meta.bg} ${meta.text} border-current`
+                      : 'text-gray-600 border-gray-800 opacity-50'
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${enabled ? meta.dot : 'bg-gray-700'}`} />
+                  {meta.label} ({(sourceCounts[src] || 0).toLocaleString()})
+                </button>
+              )
+            })}
+          </div>
 
           {/* Sport tabs */}
           <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1">
@@ -244,12 +329,12 @@ export default function Dashboard() {
                     : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
                 }`}
               >
-                {s} <span className="text-xs opacity-70">({sportCounts[s] || 0})</span>
+                {s} {sportCounts[s] ? <span className="text-xs opacity-70">({sportCounts[s]})</span> : ''}
               </button>
             ))}
           </div>
 
-          {/* Filters row */}
+          {/* Filters */}
           <div className="flex items-center gap-3">
             <input
               type="text"
@@ -275,7 +360,7 @@ export default function Dashboard() {
       </header>
 
       {/* Table */}
-      <main className="max-w-[1600px] mx-auto px-4 py-4">
+      <main className="max-w-[1800px] mx-auto px-4 py-4">
         {loading ? (
           <div className="flex items-center justify-center h-64">
             <div className="text-gray-400 text-lg">Loading props...</div>
@@ -283,54 +368,88 @@ export default function Dashboard() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="sticky top-[140px] z-20">
+              <thead className="sticky top-[160px] z-20">
                 <tr className="bg-gray-900 border-b border-gray-800">
-                  <th className="text-left px-3 py-2 text-gray-400 font-medium w-8">Src</th>
                   <SortHeader field="player_name" label="Player" current={sortField} asc={sortAsc} onClick={handleSort} />
                   <th className="text-left px-3 py-2 text-gray-400 font-medium">Game</th>
                   <SortHeader field="stat_type" label="Stat" current={sortField} asc={sortAsc} onClick={handleSort} />
-                  <SortHeader field="stat_value" label="Line" current={sortField} asc={sortAsc} onClick={handleSort} className="text-right" />
-                  <SortHeader field="over_price" label="Over" current={sortField} asc={sortAsc} onClick={handleSort} className="text-right" />
-                  <SortHeader field="under_price" label="Under" current={sortField} asc={sortAsc} onClick={handleSort} className="text-right" />
+                  {/* One column group per active source */}
+                  {activeSources.map(src => {
+                    const meta = SOURCE_META[src]
+                    return (
+                      <th key={src} colSpan={3} className={`px-1 py-2 text-center border-l border-gray-800 ${meta.text}`}>
+                        <span className="text-xs font-bold">{meta.label}</span>
+                      </th>
+                    )
+                  })}
                   <SortHeader field="updated_at" label="Updated" current={sortField} asc={sortAsc} onClick={handleSort} className="text-right" />
+                </tr>
+                <tr className="bg-gray-900/80 border-b border-gray-800">
+                  <th className="px-3 py-1"></th>
+                  <th className="px-3 py-1"></th>
+                  <th className="px-3 py-1"></th>
+                  {activeSources.map(src => (
+                    <SubHeaders key={src} />
+                  ))}
+                  <th className="px-3 py-1"></th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(prop => {
-                  const source = prop.source || 'underdog'
-                  const colors = SOURCE_COLORS[source] || SOURCE_COLORS.underdog
+                {filtered.map(row => {
+                  const numSources = Object.keys(row.sources).length
                   return (
                     <tr
-                      key={prop.id}
-                      onClick={() => setSelectedProp(prop)}
-                      className={`border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-all ${
-                        flashIds.has(prop.id) ? 'animate-flash' : ''
-                      }`}
+                      key={row.key}
+                      className={`border-b border-gray-800/50 hover:bg-gray-800/50 transition-all ${
+                        flashKeys.has(row.key) ? 'animate-flash' : ''
+                      } ${numSources > 1 ? 'bg-gray-900/30' : ''}`}
                     >
                       <td className="px-3 py-2.5">
-                        <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-[10px] font-bold ${colors.bg} ${colors.text}`}>
-                          {colors.label}
-                        </span>
+                        <div className="font-medium text-gray-100">{row.player_name}</div>
+                        <div className="text-xs text-gray-500">
+                          {row.sport_id}{row.team_abbr ? ` · ${row.team_abbr}` : ''}
+                          {numSources > 1 && (
+                            <span className="ml-1.5 text-indigo-400">({numSources} sources)</span>
+                          )}
+                        </div>
                       </td>
+                      <td className="px-3 py-2.5 text-gray-400 text-xs max-w-[160px] truncate">{row.game_display}</td>
                       <td className="px-3 py-2.5">
-                        <div className="font-medium text-gray-100">{prop.player_name || '—'}</div>
-                        <div className="text-xs text-gray-500">{prop.sport_id}{prop.team_abbr ? ` · ${prop.team_abbr}` : ''}</div>
+                        <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">{row.stat_type}</span>
                       </td>
-                      <td className="px-3 py-2.5 text-gray-400 text-xs">{prop.game_display || '—'}</td>
-                      <td className="px-3 py-2.5">
-                        <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">{prop.stat_type}</span>
-                      </td>
-                      <td className={`px-3 py-2.5 text-right font-mono font-medium ${colors.text}`}>
-                        {prop.stat_value ?? '—'}
-                      </td>
-                      <td className="px-3 py-2.5 text-right font-mono">
-                        <PriceCell price={prop.over_price} />
-                      </td>
-                      <td className="px-3 py-2.5 text-right font-mono">
-                        <PriceCell price={prop.under_price} />
-                      </td>
+                      {activeSources.map(src => {
+                        const d = row.sources[src]
+                        const meta = SOURCE_META[src]
+                        if (!d) {
+                          return (
+                            <td key={`${src}-line`} colSpan={3} className="px-1 py-2.5 text-center border-l border-gray-800">
+                              <span className="text-gray-700 text-xs">—</span>
+                            </td>
+                          )
+                        }
+                        return [
+                          <td key={`${src}-line`} className={`px-2 py-2.5 text-right font-mono font-medium border-l border-gray-800 ${meta.text}`}
+                              onClick={() => setSelectedProp(d.prop)}
+                              style={{ cursor: 'pointer' }}
+                          >
+                            {d.line ?? '—'}
+                          </td>,
+                          <td key={`${src}-over`} className="px-1 py-2.5 text-right font-mono text-xs"
+                              onClick={() => setSelectedProp(d.prop)}
+                              style={{ cursor: 'pointer' }}
+                          >
+                            <PriceCell price={d.over} />
+                          </td>,
+                          <td key={`${src}-under`} className="px-1 py-2.5 text-right font-mono text-xs"
+                              onClick={() => setSelectedProp(d.prop)}
+                              style={{ cursor: 'pointer' }}
+                          >
+                            <PriceCell price={d.under} />
+                          </td>,
+                        ]
+                      })}
                       <td className="px-3 py-2.5 text-right text-xs text-gray-500">
-                        {formatTime(prop.updated_at)}
+                        {formatTime(row.latestUpdate)}
                       </td>
                     </tr>
                   )
@@ -354,6 +473,16 @@ export default function Dashboard() {
   )
 }
 
+function SubHeaders() {
+  return (
+    <>
+      <th className="px-2 py-1 text-[10px] text-gray-500 font-normal text-right border-l border-gray-800">Line</th>
+      <th className="px-1 py-1 text-[10px] text-gray-500 font-normal text-right">O</th>
+      <th className="px-1 py-1 text-[10px] text-gray-500 font-normal text-right">U</th>
+    </>
+  )
+}
+
 function SortHeader({ field, label, current, asc, onClick, className = '' }: {
   field: SortField; label: string; current: SortField; asc: boolean;
   onClick: (f: SortField) => void; className?: string
@@ -370,15 +499,10 @@ function SortHeader({ field, label, current, asc, onClick, className = '' }: {
 }
 
 function PriceCell({ price }: { price: string | null }) {
-  if (!price) return <span className="text-gray-600">—</span>
+  if (!price) return <span className="text-gray-700">—</span>
   const num = parseInt(price)
   const color = num > 0 ? 'text-green-400' : num < -150 ? 'text-red-400' : 'text-gray-300'
   return <span className={color}>{num > 0 ? '+' : ''}{price}</span>
-}
-
-function parsePrice(price: string | null): number {
-  if (!price) return 0
-  return parseInt(price) || 0
 }
 
 function formatTime(ts: string): string {
