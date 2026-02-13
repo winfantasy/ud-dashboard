@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
 import type { Prop } from '@/lib/types'
 import LineHistoryModal from '@/components/LineHistoryModal'
 
@@ -17,6 +17,13 @@ const STAT_FILTERS: Record<string, string[]> = {
 }
 
 type SortField = 'player_name' | 'stat_type' | 'stat_value' | 'over_price' | 'under_price' | 'updated_at'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 export default function Dashboard() {
   const [props, setProps] = useState<Prop[]>([])
@@ -36,7 +43,7 @@ export default function Dashboard() {
   useEffect(() => {
     async function fetchProps() {
       setLoading(true)
-      let query = supabase
+      let query = getSupabase()
         .from('ud_props')
         .select('*')
         .eq('status', 'active')
@@ -62,7 +69,7 @@ export default function Dashboard() {
 
   // Subscribe to realtime changes
   useEffect(() => {
-    const channel = supabase
+    const channel = getSupabase()
       .channel('ud_props_changes')
       .on('postgres_changes', {
         event: '*',
@@ -92,7 +99,7 @@ export default function Dashboard() {
       })
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => { getSupabase().removeChannel(channel) }
   }, [])
 
   // Filter and sort

@@ -1,7 +1,14 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { createClient } from '@supabase/supabase-js'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 import type { Prop, LineHistory } from '@/lib/types'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
@@ -20,7 +27,7 @@ export default function LineHistoryModal({ prop, onClose }: Props) {
   useEffect(() => {
     async function fetchHistory() {
       setLoading(true)
-      const { data, error } = await supabase
+      const { data, error } = await getSupabase()
         .from('ud_line_history')
         .select('*')
         .eq('prop_id', prop.id)
