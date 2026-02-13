@@ -19,6 +19,7 @@ export interface Prop {
   game_display: string | null
   first_seen_at: string
   updated_at: string
+  source: string // 'underdog' | 'kalshi' | 'draftkings' | 'fanduel'
 }
 
 export interface LineHistory {
@@ -32,6 +33,7 @@ export interface LineHistory {
   under_decimal: number | null
   event_type: string
   recorded_at: string
+  source: string
 }
 
 export interface Player {
@@ -42,4 +44,23 @@ export interface Player {
   team_name: string | null
   position: string | null
   image_url: string | null
+}
+
+// For matching props across sources
+export interface MatchedProp {
+  key: string // player_name + stat_type + game normalization
+  player_name: string
+  sport_id: string
+  stat_type: string
+  game_display: string | null
+  team_abbr: string | null
+  sources: {
+    [source: string]: {
+      id: string
+      stat_value: number | null
+      over_price: string | null
+      under_price: string | null
+      updated_at: string
+    }
+  }
 }

@@ -25,6 +25,14 @@ body {
   animation: flash-green 1.5s ease-out;
 }
 
+@keyframes flash-row {
+  0% { background-color: rgba(99, 102, 241, 0.3); }
+  100% { background-color: transparent; }
+}
+.animate-flash {
+  animation: flash-row 2s ease-out;
+}
+
 /* Price change indicators */
 .price-up { color: #22c55e; }
 .price-down { color: #ef4444; }

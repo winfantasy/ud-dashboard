@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
-import { createClient } from '@supabase/supabase-js'
+import { getSupabase } from '@/lib/supabase'
 import type { Prop } from '@/lib/types'
 import LineHistoryModal from '@/components/LineHistoryModal'
 
@@ -16,14 +16,14 @@ const STAT_FILTERS: Record<string, string[]> = {
   UNRIVALED: ['Points', 'Rebounds', 'Assists', '3-Pointers Made'],
 }
 
-type SortField = 'player_name' | 'stat_type' | 'stat_value' | 'over_price' | 'under_price' | 'updated_at'
-
-function getSupabase() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
+const SOURCE_COLORS: Record<string, { bg: string; text: string; dot: string; label: string }> = {
+  underdog: { bg: 'bg-yellow-900/30', text: 'text-yellow-400', dot: 'bg-yellow-400', label: 'UD' },
+  kalshi: { bg: 'bg-green-900/30', text: 'text-green-400', dot: 'bg-green-400', label: 'KAL' },
+  draftkings: { bg: 'bg-blue-900/30', text: 'text-blue-400', dot: 'bg-blue-400', label: 'DK' },
+  fanduel: { bg: 'bg-orange-900/30', text: 'text-orange-400', dot: 'bg-orange-400', label: 'FD' },
 }
+
+type SortField = 'player_name' | 'stat_type' | 'stat_value' | 'over_price' | 'under_price' | 'updated_at'
 
 export default function Dashboard() {
   const [props, setProps] = useState<Prop[]>([])
@@ -34,23 +34,23 @@ export default function Dashboard() {
   const [sortAsc, setSortAsc] = useState(false)
   const [loading, setLoading] = useState(true)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
-  const [totalCount, setTotalCount] = useState(0)
   const [selectedProp, setSelectedProp] = useState<Prop | null>(null)
   const [flashIds, setFlashIds] = useState<Set<string>>(new Set())
+  const [sourceFilter, setSourceFilter] = useState<string>('ALL')
+  const [realtimeStatus, setRealtimeStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   const propsRef = useRef<Map<string, Prop>>(new Map())
 
   // Fetch initial data
   useEffect(() => {
     async function fetchProps() {
       setLoading(true)
-      let query = getSupabase()
+      const { data, error } = await getSupabase()
         .from('ud_props')
         .select('*')
         .eq('status', 'active')
         .order('updated_at', { ascending: false })
-        .limit(5000)
+        .limit(10000)
 
-      const { data, error, count } = await query
       if (error) {
         console.error('Fetch error:', error)
         setLoading(false)
@@ -60,17 +60,17 @@ export default function Dashboard() {
       const propsList = (data || []) as Prop[]
       setProps(propsList)
       propsRef.current = new Map(propsList.map(p => [p.id, p]))
-      setTotalCount(propsList.length)
       setLastUpdate(new Date())
       setLoading(false)
     }
     fetchProps()
   }, [])
 
-  // Subscribe to realtime changes
+  // Subscribe to realtime changes - using singleton client
   useEffect(() => {
-    const channel = getSupabase()
-      .channel('ud_props_changes')
+    const supabase = getSupabase()
+    const channel = supabase
+      .channel('ud_props_realtime')
       .on('postgres_changes', {
         event: '*',
         schema: 'public',
@@ -83,7 +83,6 @@ export default function Dashboard() {
           propsRef.current.delete(oldProp?.id || newProp?.id || '')
         } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
           propsRef.current.set(newProp.id, newProp)
-          // Flash the row
           setFlashIds(prev => new Set(prev).add(newProp.id))
           setTimeout(() => {
             setFlashIds(prev => {
@@ -91,15 +90,18 @@ export default function Dashboard() {
               next.delete(newProp.id)
               return next
             })
-          }, 1500)
+          }, 2000)
         }
 
         setProps(Array.from(propsRef.current.values()))
         setLastUpdate(new Date())
       })
-      .subscribe()
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') setRealtimeStatus('connected')
+        else if (status === 'CHANNEL_ERROR') setRealtimeStatus('error')
+      })
 
-    return () => { getSupabase().removeChannel(channel) }
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
   // Filter and sort
@@ -112,6 +114,9 @@ export default function Dashboard() {
     if (statFilter !== 'ALL') {
       result = result.filter(p => p.stat_type === statFilter)
     }
+    if (sourceFilter !== 'ALL') {
+      result = result.filter(p => p.source === sourceFilter)
+    }
     if (search) {
       const q = search.toLowerCase()
       result = result.filter(p =>
@@ -122,7 +127,7 @@ export default function Dashboard() {
     }
 
     result.sort((a, b) => {
-      let aVal: any, bVal: any
+      let aVal: string | number, bVal: string | number
       switch (sortField) {
         case 'player_name': aVal = a.player_name || ''; bVal = b.player_name || ''; break
         case 'stat_type': aVal = a.stat_type || ''; bVal = b.stat_type || ''; break
@@ -138,7 +143,7 @@ export default function Dashboard() {
     })
 
     return result
-  }, [props, sport, statFilter, search, sortField, sortAsc])
+  }, [props, sport, statFilter, sourceFilter, search, sortField, sortAsc])
 
   const handleSort = useCallback((field: SortField) => {
     if (sortField === field) setSortAsc(!sortAsc)
@@ -153,10 +158,24 @@ export default function Dashboard() {
     return counts
   }, [props])
 
+  const sourceCounts = useMemo(() => {
+    const counts: Record<string, number> = { ALL: props.length }
+    props.forEach(p => {
+      const src = p.source || 'underdog'
+      counts[src] = (counts[src] || 0) + 1
+    })
+    return counts
+  }, [props])
+
   const statTypes = useMemo(() => {
     if (sport === 'ALL') return []
     return STAT_FILTERS[sport] || []
   }, [sport])
+
+  const activeSources = useMemo(() => {
+    const sources = new Set(props.map(p => p.source || 'underdog'))
+    return Array.from(sources).sort()
+  }, [props])
 
   return (
     <div className="min-h-screen">
@@ -165,9 +184,13 @@ export default function Dashboard() {
         <div className="max-w-[1600px] mx-auto">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
-              <h1 className="text-xl font-bold">🐕 Underdog Props</h1>
-              <span className="text-xs px-2 py-0.5 rounded bg-green-900/50 text-green-400 font-mono">
-                LIVE
+              <h1 className="text-xl font-bold">📊 Props Dashboard</h1>
+              <span className={`text-xs px-2 py-0.5 rounded font-mono ${
+                realtimeStatus === 'connected' ? 'bg-green-900/50 text-green-400' :
+                realtimeStatus === 'error' ? 'bg-red-900/50 text-red-400' :
+                'bg-yellow-900/50 text-yellow-400'
+              }`}>
+                {realtimeStatus === 'connected' ? '● LIVE' : realtimeStatus === 'error' ? '● ERROR' : '● CONNECTING'}
               </span>
             </div>
             <div className="flex items-center gap-4 text-xs text-gray-400">
@@ -177,6 +200,36 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Source legend */}
+          {activeSources.length > 1 && (
+            <div className="flex items-center gap-3 mb-3">
+              <span className="text-xs text-gray-500">Sources:</span>
+              <button
+                onClick={() => setSourceFilter('ALL')}
+                className={`px-2 py-0.5 text-xs rounded ${
+                  sourceFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                All ({sourceCounts.ALL || 0})
+              </button>
+              {activeSources.map(src => {
+                const colors = SOURCE_COLORS[src] || SOURCE_COLORS.underdog
+                return (
+                  <button
+                    key={src}
+                    onClick={() => setSourceFilter(src)}
+                    className={`flex items-center gap-1.5 px-2 py-0.5 text-xs rounded ${
+                      sourceFilter === src ? `${colors.bg} ${colors.text}` : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                  >
+                    <span className={`w-2 h-2 rounded-full ${colors.dot}`} />
+                    {colors.label} ({sourceCounts[src] || 0})
+                  </button>
+                )
+              })}
+            </div>
+          )}
 
           {/* Sport tabs */}
           <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1">
@@ -229,8 +282,9 @@ export default function Dashboard() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="sticky top-[120px] z-20">
+              <thead className="sticky top-[140px] z-20">
                 <tr className="bg-gray-900 border-b border-gray-800">
+                  <th className="text-left px-3 py-2 text-gray-400 font-medium w-8">Src</th>
                   <SortHeader field="player_name" label="Player" current={sortField} asc={sortAsc} onClick={handleSort} />
                   <th className="text-left px-3 py-2 text-gray-400 font-medium">Game</th>
                   <SortHeader field="stat_type" label="Stat" current={sortField} asc={sortAsc} onClick={handleSort} />
@@ -241,36 +295,45 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(prop => (
-                  <tr
-                    key={prop.id}
-                    onClick={() => setSelectedProp(prop)}
-                    className={`border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors ${
-                      flashIds.has(prop.id) ? 'flash-update' : ''
-                    }`}
-                  >
-                    <td className="px-3 py-2.5">
-                      <div className="font-medium text-gray-100">{prop.player_name || '—'}</div>
-                      <div className="text-xs text-gray-500">{prop.sport_id}{prop.team_abbr ? ` · ${prop.team_abbr}` : ''}</div>
-                    </td>
-                    <td className="px-3 py-2.5 text-gray-400 text-xs">{prop.game_display || '—'}</td>
-                    <td className="px-3 py-2.5">
-                      <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">{prop.stat_type}</span>
-                    </td>
-                    <td className="px-3 py-2.5 text-right font-mono font-medium text-indigo-400">
-                      {prop.stat_value ?? '—'}
-                    </td>
-                    <td className="px-3 py-2.5 text-right font-mono">
-                      <PriceCell price={prop.over_price} />
-                    </td>
-                    <td className="px-3 py-2.5 text-right font-mono">
-                      <PriceCell price={prop.under_price} />
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-xs text-gray-500">
-                      {formatTime(prop.updated_at)}
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map(prop => {
+                  const source = prop.source || 'underdog'
+                  const colors = SOURCE_COLORS[source] || SOURCE_COLORS.underdog
+                  return (
+                    <tr
+                      key={prop.id}
+                      onClick={() => setSelectedProp(prop)}
+                      className={`border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-all ${
+                        flashIds.has(prop.id) ? 'animate-flash' : ''
+                      }`}
+                    >
+                      <td className="px-3 py-2.5">
+                        <span className={`inline-flex items-center justify-center w-6 h-6 rounded text-[10px] font-bold ${colors.bg} ${colors.text}`}>
+                          {colors.label}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="font-medium text-gray-100">{prop.player_name || '—'}</div>
+                        <div className="text-xs text-gray-500">{prop.sport_id}{prop.team_abbr ? ` · ${prop.team_abbr}` : ''}</div>
+                      </td>
+                      <td className="px-3 py-2.5 text-gray-400 text-xs">{prop.game_display || '—'}</td>
+                      <td className="px-3 py-2.5">
+                        <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 text-xs">{prop.stat_type}</span>
+                      </td>
+                      <td className={`px-3 py-2.5 text-right font-mono font-medium ${colors.text}`}>
+                        {prop.stat_value ?? '—'}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono">
+                        <PriceCell price={prop.over_price} />
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono">
+                        <PriceCell price={prop.under_price} />
+                      </td>
+                      <td className="px-3 py-2.5 text-right text-xs text-gray-500">
+                        {formatTime(prop.updated_at)}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
             {filtered.length === 0 && !loading && (
@@ -280,7 +343,6 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* Line History Modal */}
       {selectedProp && (
         <LineHistoryModal
           prop={selectedProp}
@@ -290,8 +352,6 @@ export default function Dashboard() {
     </div>
   )
 }
-
-// ─── Helper Components ───
 
 function SortHeader({ field, label, current, asc, onClick, className = '' }: {
   field: SortField; label: string; current: SortField; asc: boolean;

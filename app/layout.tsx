@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Underdog Props | Live Lines",
-  description: "Real-time Underdog Fantasy props dashboard",
+  title: "Props Dashboard | Live Lines",
+  description: "Real-time props dashboard — Underdog, Kalshi, DraftKings, FanDuel",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
