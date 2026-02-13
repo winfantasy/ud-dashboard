@@ -44,7 +44,56 @@ export default function Dashboard() {
   const [flashKeys, setFlashKeys] = useState<Set<string>>(new Set())
   const [sourcesEnabled, setSourcesEnabled] = useState<Record<string, boolean>>({})
   const [realtimeStatus, setRealtimeStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
+  const [sportMappings, setSportMappings] = useState<{ canonical_name: string; source: string; source_sport_id: string }[]>([])
+  const [statMappingsData, setStatMappingsData] = useState<{ canonical_name: string; source: string; source_stat_type: string; sport_context: string | null }[]>([])
   const propsRef = useRef<Map<string, Prop>>(new Map())
+
+  // Fetch mappings
+  useEffect(() => {
+    async function fetchMappings() {
+      const supabase = getSupabase()
+      const [sportRes, statRes] = await Promise.all([
+        supabase.from('ud_sport_mappings').select('canonical_name, source, source_sport_id'),
+        supabase.from('ud_stat_mappings').select('canonical_name, source, source_stat_type, sport_context'),
+      ])
+      setSportMappings(sportRes.data || [])
+      setStatMappingsData(statRes.data || [])
+    }
+    fetchMappings()
+  }, [])
+
+  // Build lookup maps from mappings
+  const sportLookup = useMemo(() => {
+    // source||sport_id -> canonical_name
+    const map = new Map<string, string>()
+    sportMappings.forEach(m => map.set(`${m.source}||${m.source_sport_id}`, m.canonical_name))
+    return map
+  }, [sportMappings])
+
+  const statLookup = useMemo(() => {
+    // source||stat_type||sport_context -> canonical_name
+    const map = new Map<string, string>()
+    statMappingsData.forEach(m => {
+      map.set(`${m.source}||${m.source_stat_type}||${m.sport_context || ''}`, m.canonical_name)
+      // Also try without sport context
+      if (m.sport_context) map.set(`${m.source}||${m.source_stat_type}||`, m.canonical_name)
+    })
+    return map
+  }, [statMappingsData])
+
+  // Resolve canonical sport for a prop
+  function getCanonicalSport(p: Prop): string {
+    const src = p.source || 'underdog'
+    return sportLookup.get(`${src}||${p.sport_id}`) || p.sport_id
+  }
+
+  // Resolve canonical stat for a prop
+  function getCanonicalStat(p: Prop): string {
+    const src = p.source || 'underdog'
+    return statLookup.get(`${src}||${p.stat_type}||${p.sport_id}`) ||
+           statLookup.get(`${src}||${p.stat_type}||`) ||
+           p.stat_type
+  }
 
   // Fetch initial data
   useEffect(() => {
@@ -139,9 +188,11 @@ export default function Dashboard() {
       .replace(/pts \+ rebs \+ asts/i, 'pts + rebs + asts')
   }
 
-  // Merge key for grouping
+  // Merge key for grouping — uses canonical names from mappings
   function makeMergeKey(p: Prop): string {
-    return `${normName(p.player_name)}||${normStat(p.stat_type)}||${p.sport_id}`
+    const canonSport = getCanonicalSport(p)
+    const canonStat = getCanonicalStat(p)
+    return `${normName(p.player_name)}||${normStat(canonStat)}||${canonSport}`
   }
 
   // Merge props into rows
@@ -159,8 +210,8 @@ export default function Dashboard() {
         row = {
           key,
           player_name: p.player_name || '—',
-          sport_id: p.sport_id,
-          stat_type: p.stat_type,
+          sport_id: getCanonicalSport(p),
+          stat_type: getCanonicalStat(p),
           game_display: p.game_display || '—',
           team_abbr: p.team_abbr || '',
           sources: {},
@@ -283,6 +334,7 @@ export default function Dashboard() {
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-bold">📊 Props Dashboard</h1>
+              <a href="/admin" className="text-xs text-gray-500 hover:text-indigo-400">⚙️ Mappings</a>
               <span className={`text-xs px-2 py-0.5 rounded font-mono ${
                 realtimeStatus === 'connected' ? 'bg-green-900/50 text-green-400' :
                 realtimeStatus === 'error' ? 'bg-red-900/50 text-red-400' :
