@@ -20,6 +20,7 @@ const SOURCE_COLORS: Record<string, { bg: string; text: string; dot: string; lab
   underdog: { bg: 'bg-yellow-900/30', text: 'text-yellow-400', dot: 'bg-yellow-400', label: 'UD' },
   kalshi: { bg: 'bg-green-900/30', text: 'text-green-400', dot: 'bg-green-400', label: 'KAL' },
   draftkings: { bg: 'bg-blue-900/30', text: 'text-blue-400', dot: 'bg-blue-400', label: 'DK' },
+  prizepicks: { bg: 'bg-purple-900/30', text: 'text-purple-400', dot: 'bg-purple-400', label: 'PP' },
   fanduel: { bg: 'bg-orange-900/30', text: 'text-orange-400', dot: 'bg-orange-400', label: 'FD' },
 }
 
