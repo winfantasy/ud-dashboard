@@ -5,7 +5,7 @@ import { getSupabase } from '@/lib/supabase'
 import type { Prop } from '@/lib/types'
 import LineHistoryModal from '@/components/LineHistoryModal'
 
-const SPORTS = ['ALL', 'NBA', 'CBB', 'NHL', 'MLB', 'PGA', 'MMA', 'SOCCER', 'TENNIS', 'UNRIVALED'] as const
+const SPORTS_PRIORITY = ['ALL', 'NBA', '3PT', 'DUNK', 'THREE_PT', 'CBB', 'NHL', 'MLB', 'PGA', 'MMA', 'SOCCER', 'TENNIS', 'UNRIVALED', 'OLYMPICS']
 
 const SOURCE_META: Record<string, { bg: string; text: string; dot: string; label: string; color: string }> = {
   underdog: { bg: 'bg-yellow-900/30', text: 'text-yellow-400', dot: 'bg-yellow-400', label: 'UD', color: '#facc15' },
@@ -241,6 +241,14 @@ export default function Dashboard() {
     return counts
   }, [merged])
 
+  // Dynamic sports list: prioritized order, then any extras alphabetically
+  const sportTabs = useMemo(() => {
+    const activeSports = Object.keys(sportCounts).filter(s => s !== 'ALL' && sportCounts[s] > 0)
+    const ordered = SPORTS_PRIORITY.filter(s => s === 'ALL' || activeSports.includes(s))
+    const extras = activeSports.filter(s => !SPORTS_PRIORITY.includes(s)).sort()
+    return [...ordered, ...extras]
+  }, [sportCounts])
+
   const sourceCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     props.forEach(p => {
@@ -319,7 +327,7 @@ export default function Dashboard() {
 
           {/* Sport tabs */}
           <div className="flex items-center gap-2 mb-3 overflow-x-auto pb-1">
-            {SPORTS.map(s => (
+            {sportTabs.map(s => (
               <button
                 key={s}
                 onClick={() => { setSport(s); setStatFilter('ALL') }}
